@@ -1,0 +1,95 @@
+# UDON Managed Pipeline
+# https://engineering.zenbusiness.team/docs/default/component/core-pipeline-actions/workflows/pr-reviewer-guide/
+name: '🧭 PR Reviewer Guide'
+on:
+  pull_request:
+    types:
+      - opened
+  issue_comment:
+    types:
+      - created
+jobs:
+  # PILOT: announces the /reviewer-guide tool on new PRs by posting it as a
+  # new PR comment. Two-layer skip-claude-review check is intentional (see
+  # the caller workflow's docs) - do not remove either layer as redundant.
+  # Draft state is never inspected on purpose: a PR created as a draft and
+  # a PR created already open both get the announcement.
+  announce-pilot:
+    name: 'Announce reviewer guide pilot'
+    if: >
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.fork == false &&
+      !endsWith(github.event.pull_request.user.login, '[bot]') &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-claude-review')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - name: '📣 Post pilot announcement comment'
+        continue-on-error: true
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const MARKER = '<!-- devplat:pr-reviewer-guide-pilot -->';
+            const BODY = `${MARKER}
+
+            ---
+
+            DevPlat has been building a **PR Reviewer Guide**, and we're looking for feedback.
+
+            It provides an on-demand \`/reviewer-guide\` workflow that creates a human-oriented
+            reading plan for a pull request. The guide helps reviewers understand change scope,
+            recommended file order, risky areas, existing discussion, and open questions.
+
+            **How to use it** — comment \`/reviewer-guide\` on this PR.
+
+            **What we need from testers**
+
+            - :+1: on the guide comment if you agree with its assessment.
+            - :-1: if you disagree — a comment on why would be super helpful. Click the
+              PR Reviewer Guide response and select "Quote reply."
+
+            ---`;
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+
+            try {
+              // Authoritative check: re-reads live label state. The job-level
+              // `if:` above only sees the event payload snapshot at open time,
+              // so this catches skip-claude-review applied moments later.
+              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: issue_number });
+              const labels = (pr.labels || []).map((label) => label.name);
+              if (labels.includes('skip-claude-review')) {
+                core.info('Skipping announcement: skip-claude-review label present.');
+                return;
+              }
+
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number,
+              });
+              if (comments.some((comment) => (comment.body || '').includes(MARKER))) {
+                core.info('Skipping announcement: marker already present in an existing comment.');
+                return;
+              }
+
+              await github.rest.issues.createComment({ owner, repo, issue_number, body: BODY });
+            } catch (error) {
+              core.warning(`Failed to post pilot announcement: ${error.message}`);
+            }
+
+  reviewer-guide:
+    name: 'Reviewer Guide'
+    # Comment-only trigger for now. The ready-for-review pull_request path is
+    # intentionally omitted; restore it from git history when that automatic
+    # trigger is wanted again.
+    if: >
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request != null &&
+      startsWith(github.event.comment.body, '/reviewer-guide')
+    uses: zenbusiness/core-pipeline-actions/.github/workflows/pr-reviewer-guide.yaml@v4
+    secrets: inherit
+    with:
+      claude-code-model: 'claude-sonnet-5'
